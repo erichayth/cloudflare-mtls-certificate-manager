@@ -24,7 +24,7 @@ A Cloudflare Workers application that provides a web UI and API for managing mTL
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-username/cloudflare-mtls-certificate-manager.git
+   git clone https://github.com/erichayth/cloudflare-mtls-certificate-manager.git
    cd cloudflare-mtls-certificate-manager
    ```
 
