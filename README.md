@@ -2,6 +2,8 @@
 
 A Cloudflare Workers application that provides a web UI and API for managing mTLS certificates, hostname associations, and client certificate forwarding settings.
 
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/erichayth/cloudflare-mtls-certificate-manager)
+
 Public Example: https://certmanager.cf-tool.com/
 
 ## Features
