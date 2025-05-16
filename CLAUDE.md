@@ -1,1 +1,0 @@
-- work with file worker.js
