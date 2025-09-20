@@ -320,9 +320,13 @@ async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
   
   // Prepare the payload for Cloudflare API
   const payload = {
-    hostname: requestBody.hostname,
-    client_certificate_forwarding: requestBody.enabled === true
-    // china_network field is not included as we're not modifying it
+    settings: [
+      {
+        hostname: requestBody.hostname,
+        client_certificate_forwarding: requestBody.enabled === true,
+        china_network: false
+      }
+    ]
   };
   
   console.log(`Setting certificate forwarding for hostname ${requestBody.hostname} to ${requestBody.enabled === true ? 'enabled' : 'disabled'}`);
