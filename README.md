@@ -32,24 +32,39 @@ Public Example: https://certmanager.cf-tool.com/
    cd cloudflare-mtls-certificate-manager
    ```
 
-2. Open the `worker.js` file and update the `CONFIG` object with your Cloudflare account information:
+2. Open the `worker.js` file and update the `CONFIG` object with your Cloudflare account information (or set Wrangler `[vars]` in `wrangler.toml`):
    ```javascript
    const CONFIG = {
      // Your Cloudflare account ID
      ACCOUNT_ID: "your-account-id-here", // Replace or set as a secret
      
      // Auth settings - can be replaced with Workers Secrets or environment variables
-     AUTH_EMAIL: "your-email@example.com", // Your Cloudflare account email
-     AUTH_KEY: "your-api-key-here",   // Your Cloudflare API key
+     AUTH_EMAIL: "your-email@example.com", // Email for Global API Key auth
+     AUTH_KEY: "your-global-api-key-here", // Global API Key (required if using server-side auth)
+     AUTH_TOKEN: "",                   // API Token (UI support coming soon)
+     ALLOWED_ORIGINS: ""               // Comma-separated CORS allowlist (empty = same-origin only)
    };
    ```
 
-3. For better security, use Wrangler secrets instead of hardcoding your credentials:
+3. Current auth: Only Global API Keys are supported in the UI. API Token support will be added in the future. If you choose to configure credentials server-side, set them via Wrangler secrets/vars (recommended rather than hardcoding):
    ```bash
    wrangler secret put ACCOUNT_ID
    wrangler secret put AUTH_EMAIL
    wrangler secret put AUTH_KEY
+   # Optional until token support is added to the UI
+   wrangler secret put AUTH_TOKEN
    ```
+
+   And set a CORS allowlist in `wrangler.toml` if needed:
+   ```toml
+   [vars]
+   ALLOWED_ORIGINS = "https://your-ui.example.com"
+   ```
+
+   CORS behavior:
+   - Leave `ALLOWED_ORIGINS` empty for strict same-origin: only the deployed worker host (e.g., `https://<service>.<subdomain>.workers.dev` or your custom route host) is allowed.
+   - Set one or more exact origins (comma-separated) to allow cross-origin browser calls from those sites.
+   - No wildcard is emitted; non-browser requests (no `Origin` header) don’t get an `Access-Control-Allow-Origin` header.
 
 ### Deploy with Wrangler
 
@@ -89,7 +104,7 @@ You can also deploy directly from the Cloudflare Dashboard:
 
 After deployment, access the web UI by visiting your Worker URL. The interface provides:
 
-1. **Credentials Section** - Enter your Cloudflare API credentials
+1. **Credentials Section** - Enter your Email + Global API Key and Account ID. Note: Only Global API Keys are supported in the UI currently. API Token support will be added in the future.
 2. **Upload Certificate** - Upload new CA certificates
 3. **List Certificates** - View all existing certificates
 4. **Hostname Associations** - Associate certificates with specific hostnames

@@ -1,0 +1,14 @@
+name = "mtls-certificate-manager"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+workers_dev = true
+
+[build]
+command = ""
+
+[build.upload]
+format = "service-worker"
+
+[vars]
+# Set to a comma-separated list of allowed origins for CORS, or "*" to allow all, or empty for same-origin only.
+ALLOWED_ORIGINS = ""

@@ -13,22 +13,89 @@ const CONFIG = {
   // Auth settings - can be replaced with Workers Secrets or environment variables
   AUTH_EMAIL: "", // Your Cloudflare account email
   AUTH_KEY: "",   // Your Cloudflare API key
+  // Prefer using an API Token via the Authorization header from the client.
+  // You may also set a server-side token here if you don't want to accept
+  // client-provided credentials (not recommended for multi-tenant/public UIs).
+  AUTH_TOKEN: "",
 
   // API endpoints
   CF_API_BASE: "https://api.cloudflare.com/client/v4",
+  
+  // Comma-separated list of allowed Origins for CORS (e.g., https://certmanager.cf-tool.com,https://example.com)
+  // Leave empty to allow only same-origin requests. Use "*" to allow all.
+  ALLOWED_ORIGINS: "",
 };
+
+// Optionally pull values from Wrangler [vars] if defined (classic worker globals)
+try {
+  if (typeof ALLOWED_ORIGINS !== 'undefined') CONFIG.ALLOWED_ORIGINS = ALLOWED_ORIGINS;
+  if (typeof ACCOUNT_ID !== 'undefined') CONFIG.ACCOUNT_ID = ACCOUNT_ID;
+  if (typeof AUTH_TOKEN !== 'undefined') CONFIG.AUTH_TOKEN = AUTH_TOKEN;
+  if (typeof AUTH_EMAIL !== 'undefined') CONFIG.AUTH_EMAIL = AUTH_EMAIL;
+  if (typeof AUTH_KEY !== 'undefined') CONFIG.AUTH_KEY = AUTH_KEY;
+} catch (e) {
+  // ignore if vars are not defined
+}
+
+// Helper: build CORS headers based on request Origin and allowlist
+function getCorsHeadersForRequest(request) {
+  const url = new URL(request.url);
+  const origin = request.headers.get("Origin");
+  const allowedList = (CONFIG.ALLOWED_ORIGINS || "").split(",").map(o => o.trim()).filter(Boolean);
+  const wildcard = allowedList.includes("*");
+  let allowOrigin = undefined;
+
+  if (wildcard) {
+    allowOrigin = origin || "*";
+  } else if (origin && allowedList.length > 0) {
+    if (allowedList.includes(origin)) allowOrigin = origin;
+  } else if (!origin) {
+    // Non-CORS requests: no CORS header needed
+  } else {
+    // Default to same-origin only
+    const sameOrigin = `${url.protocol}//${url.host}`;
+    if (origin === sameOrigin) allowOrigin = origin;
+  }
+
+  const base = {
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Auth-Email, X-Auth-Key, Authorization",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+  };
+  if (allowOrigin) base["Access-Control-Allow-Origin"] = allowOrigin;
+  return base;
+}
+
+// Helper: build Cloudflare API auth headers from request or config
+function getCfAuthHeaders(request) {
+  // Prefer Authorization: Bearer <token>
+  const authHeader = request.headers.get("Authorization");
+  if (authHeader && authHeader.trim().length > 0) {
+    return { Authorization: authHeader };
+  }
+
+  // Fallback: client-provided email/key
+  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
+  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
+  if (authEmail && authKey) {
+    return { "X-Auth-Email": authEmail, "X-Auth-Key": authKey };
+  }
+
+  // Final fallback: server-side token in config
+  if (CONFIG.AUTH_TOKEN) {
+    return { Authorization: `Bearer ${CONFIG.AUTH_TOKEN}` };
+  }
+
+  return null;
+}
 
 /**
  * Main request handler for the worker
  */
 async function handleRequest(request) {
-  // CORS headers to allow cross-origin requests
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Auth-Email, X-Auth-Key, Authorization",
-    "Access-Control-Max-Age": "86400",
-  };
+  // CORS headers to allow cross-origin requests (respect allowlist)
+  const corsHeaders = getCorsHeadersForRequest(request);
   
   // Handle OPTIONS request for CORS preflight
   if (request.method === "OPTIONS") {
@@ -41,6 +108,7 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   
   // Log the request URL and method for debugging
+  // Minimal request log without sensitive data
   console.log(`Request: ${request.method} ${url.pathname}`);
   
   // Normalize path (remove trailing slash if present)
@@ -170,15 +238,12 @@ async function handleRequest(request) {
  * NEW: Handle getting certificate forwarding settings
  */
 async function handleGetCertificateForwarding(request, corsHeaders, zoneId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -212,8 +277,7 @@ async function handleGetCertificateForwarding(request, corsHeaders, zoneId) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
@@ -221,7 +285,7 @@ async function handleGetCertificateForwarding(request, corsHeaders, zoneId) {
     // Get response from Cloudflare API
     const responseData = await response.json();
     console.log(`Response from Cloudflare API: ${response.status}`);
-    console.log(`Response data:`, responseData);
+    // Omit logging response body to avoid leaking details
     
     // Return response with appropriate status code
     return new Response(JSON.stringify(responseData), {
@@ -251,15 +315,12 @@ async function handleGetCertificateForwarding(request, corsHeaders, zoneId) {
  * NEW: Handle updating certificate forwarding settings
  */
 async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -330,7 +391,6 @@ async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
   };
   
   console.log(`Setting certificate forwarding for hostname ${requestBody.hostname} to ${requestBody.enabled === true ? 'enabled' : 'disabled'}`);
-  console.log(`Payload: ${JSON.stringify(payload)}`);
   
   // Make request to Cloudflare API
   try {
@@ -338,8 +398,7 @@ async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       },
       body: JSON.stringify(payload)
@@ -348,7 +407,7 @@ async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
     // Get response from Cloudflare API
     const responseData = await response.json();
     console.log(`Response from Cloudflare API: ${response.status}`);
-    console.log(`Response data:`, responseData);
+    // Omit logging response body
     
     // Return response with appropriate status code
     return new Response(JSON.stringify(responseData), {
@@ -378,15 +437,12 @@ async function handleUpdateCertificateForwarding(request, corsHeaders, zoneId) {
  * Handle certificate upload request
  */
 async function handleCertificateUpload(request, corsHeaders) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -475,8 +531,7 @@ async function handleCertificateUpload(request, corsHeaders) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       },
       body: JSON.stringify(payload)
@@ -514,15 +569,12 @@ async function handleCertificateUpload(request, corsHeaders) {
  * Handle listing certificates
  */
 async function handleListCertificates(request, corsHeaders) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -558,8 +610,7 @@ async function handleListCertificates(request, corsHeaders) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
@@ -598,17 +649,17 @@ async function handleListCertificates(request, corsHeaders) {
 async function handleListZones(request, corsHeaders) {
   console.log("Executing handleListZones function");
   
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
   
-  console.log(`Auth headers: ${authEmail ? 'Email present' : 'Email missing'}, ${authKey ? 'Key present' : 'Key missing'}`);
+  // Minimal debug without leaking secrets
+  console.log(`Auth supplied: ${authHeaders ? 'yes' : 'no'}`);
   
   // Validate authorization
-  if (!authEmail || !authKey) {
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -628,8 +679,7 @@ async function handleListZones(request, corsHeaders) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
@@ -667,15 +717,12 @@ async function handleListZones(request, corsHeaders) {
  * Handle listing hostname associations for a zone
  */
 async function handleListHostnameAssociations(request, corsHeaders, zoneId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -719,15 +766,14 @@ async function handleListHostnameAssociations(request, corsHeaders, zoneId) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
     
     // Get response from Cloudflare API
     const responseData = await response.json();
-    console.log("Hostname associations response:", JSON.stringify(responseData));
+    // Avoid logging full response bodies
     
     // Create a formatted response object
     let formattedResponse = {
@@ -760,7 +806,7 @@ async function handleListHostnameAssociations(request, corsHeaders, zoneId) {
       }
     }
     
-    console.log("Formatted response:", JSON.stringify(formattedResponse));
+    // Avoid logging formatted response body
     
     // Return the formatted response
     return new Response(JSON.stringify(formattedResponse), {
@@ -790,15 +836,12 @@ async function handleListHostnameAssociations(request, corsHeaders, zoneId) {
  * Handle associating hostname with certificate
  */
 async function handleAssociateHostname(request, corsHeaders, certId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -811,9 +854,8 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
   // Parse request body
   let requestBody;
   try {
-    // First get the request as text to log it for debugging
+    // First get the request as text
     const text = await request.text();
-    console.log("Raw request body:", text);
     
     if (!text || text.trim() === '') {
       return new Response(JSON.stringify({
@@ -831,7 +873,6 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
     // Try to parse the text as JSON
     try {
       requestBody = JSON.parse(text);
-      console.log("Parsed request body:", JSON.stringify(requestBody));
     } catch (parseError) {
       console.error("JSON parse error:", parseError);
       return new Response(JSON.stringify({
@@ -910,9 +951,7 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
     mtls_certificate_id: certId  // Using the certificate ID from the path
   };
   
-  console.log(`Associating ${hostnamesArray.length} hostname(s) with certificate: ${certId} for zone: ${requestBody.zoneId}`);
-  console.log(`API URL: ${cfApiUrl}`);
-  console.log(`Payload: ${JSON.stringify(payload)}`);
+  console.log(`Associating ${hostnamesArray.length} hostname(s) for zone: ${requestBody.zoneId}`);
   
   // Make request to Cloudflare API using PUT method instead of POST
   try {
@@ -920,8 +959,7 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
       method: "PUT",  // Using PUT instead of POST for Replace Hostname Associations endpoint
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       },
       body: JSON.stringify(payload)
@@ -935,12 +973,11 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
     
     try {
       responseText = await response.text();
-      console.log("Raw response text:", responseText);
+      // do not log raw response text (may contain details)
       
       if (responseText && responseText.trim() !== '') {
         try {
           responseData = JSON.parse(responseText);
-          console.log("Parsed response data:", JSON.stringify(responseData));
         } catch (parseError) {
           console.error("Error parsing response as JSON:", parseError);
           // Return a formatted error response with the raw text
@@ -1013,15 +1050,12 @@ async function handleAssociateHostname(request, corsHeaders, certId) {
  * Handle getting hostname associations for a certificate
  */
 async function handleGetHostnameAssociations(request, corsHeaders, certId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -1064,15 +1098,14 @@ async function handleGetHostnameAssociations(request, corsHeaders, certId) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
     
     // Get response from Cloudflare API
     const responseData = await response.json();
-    console.log("Hostname associations response:", JSON.stringify(responseData));
+    // avoid logging full response body
     
     // Create a formatted response object
     let formattedResponse = {
@@ -1105,7 +1138,7 @@ async function handleGetHostnameAssociations(request, corsHeaders, certId) {
       }
     }
     
-    console.log("Formatted response:", JSON.stringify(formattedResponse));
+    // avoid logging formatted response body
     
     // Return the formatted response
     return new Response(JSON.stringify(formattedResponse), {
@@ -1135,15 +1168,12 @@ async function handleGetHostnameAssociations(request, corsHeaders, certId) {
  * Handle deleting hostname association
  */
 async function handleDeleteHostnameAssociation(request, corsHeaders, certId) {
-  // Extract authorization headers
-  const authEmail = request.headers.get("X-Auth-Email") || CONFIG.AUTH_EMAIL;
-  const authKey = request.headers.get("X-Auth-Key") || CONFIG.AUTH_KEY;
-  
-  // Validate authorization
-  if (!authEmail || !authKey) {
+  // Build auth headers (Bearer token preferred)
+  const authHeaders = getCfAuthHeaders(request);
+  if (!authHeaders) {
     return new Response(JSON.stringify({
       success: false,
-      errors: [{ message: "Missing authentication credentials. Provide X-Auth-Email and X-Auth-Key headers." }]
+      errors: [{ message: "Missing authentication. Provide Authorization: Bearer <token> or X-Auth-Email/X-Auth-Key." }]
     }), {
       status: 401,
       headers: {
@@ -1185,8 +1215,7 @@ async function handleDeleteHostnameAssociation(request, corsHeaders, certId) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       }
     });
@@ -1225,15 +1254,14 @@ async function handleDeleteHostnameAssociation(request, corsHeaders, certId) {
       mtls_certificate_id: certId
     };
     
-    console.log(`Updating hostname associations without ${hostname}: ${JSON.stringify(payload)}`);
+    console.log(`Updating hostname associations without ${hostname}`);
     
     // Make the PUT request to update associations
     const updateResponse = await fetch(cfApiUrl, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "X-Auth-Email": authEmail,
-        "X-Auth-Key": authKey,
+        ...authHeaders,
         "Accept": "application/json"
       },
       body: JSON.stringify(payload)
@@ -1299,20 +1327,39 @@ function getHtmlUI() {
     <div class="credentials-section">
       <h2>Cloudflare Credentials</h2>
       <div class="form-group">
-        <label for="email">Email Address</label>
-        <input type="email" id="email" placeholder="Your Cloudflare email">
+        <label>Auth Method</label>
+        <div class="radio-group">
+          <label><input type="radio" name="auth-method" value="token"> API Token</label>
+          <label><input type="radio" name="auth-method" value="legacy" checked> Email + API Key</label>
+        </div>
+        <p class="info-note">Note: Only Global API Keys are supported at this time. API Token support will be added in the future.</p>
       </div>
-      <div class="form-group">
-        <label for="api-key">API Key</label>
-        <input type="password" id="api-key" placeholder="Your Cloudflare API key">
+
+      <div id="token-credentials">
+        <div class="form-group">
+          <label for="api-token">API Token (coming soon)</label>
+          <input type="password" id="api-token" placeholder="Cloudflare API Token (scoped)">
+        </div>
       </div>
+
+      <div id="legacy-credentials" style="display:none;">
+        <div class="form-group">
+          <label for="auth-email">Email</label>
+          <input type="email" id="auth-email" placeholder="you@example.com">
+        </div>
+        <div class="form-group">
+          <label for="auth-key">Global API Key</label>
+          <input type="password" id="auth-key" placeholder="Cloudflare Global API Key">
+        </div>
+      </div>
+
       <div class="form-group">
         <label for="account-id">Account ID</label>
         <input type="text" id="account-id" placeholder="Your Cloudflare account ID">
       </div>
       <button id="save-credentials" class="btn primary">Save Credentials</button>
       <div class="checkbox-group">
-        <input type="checkbox" id="remember-credentials" checked>
+        <input type="checkbox" id="remember-credentials">
         <label for="remember-credentials">Remember credentials in browser</label>
       </div>
       <div id="credentials-message" class="message"></div>
@@ -1354,7 +1401,6 @@ function getHtmlUI() {
     
     <div id="list" class="tab-content">
       <h2>Existing Certificates</h2>
-      <button id="refresh-certs" class="btn secondary">Refresh List</button>
       <div id="certificates-list"></div>
       <div id="list-message" class="message"></div>
     </div>
@@ -1368,7 +1414,6 @@ function getHtmlUI() {
           <select id="zone-select">
             <option value="">-- Select a zone --</option>
           </select>
-          <button id="load-zones" class="btn secondary">Load Zones</button>
         </div>
         
         <div class="form-group">
@@ -1376,7 +1421,6 @@ function getHtmlUI() {
           <select id="cert-select">
             <option value="">-- All Certificates --</option>
           </select>
-          <button id="load-certs-for-hostnames" class="btn secondary">Load Certificates</button>
         </div>
       </div>
       
@@ -1402,7 +1446,6 @@ function getHtmlUI() {
       
       <div class="hostname-list">
         <h3>Current Hostname Associations</h3>
-        <button id="refresh-hostnames" class="btn secondary">Refresh Associations</button>
         <div id="hostname-associations-list"></div>
       </div>
     </div>
@@ -1421,10 +1464,7 @@ function getHtmlUI() {
           <select id="forwarding-zone-select">
             <option value="">-- Select a zone --</option>
           </select>
-          <button id="load-forwarding-zones" class="btn secondary">Load Zones</button>
         </div>
-        
-        <button id="check-forwarding" class="btn secondary">Check Status</button>
       </div>
       
       <div class="forwarding-toggle" style="display: none;">
@@ -1799,6 +1839,17 @@ select:focus {
     border-bottom: 1px solid var(--medium-gray);
   }
   
+  .radio-group label {
+    margin-right: 20px;
+    font-weight: normal;
+  }
+
+  .info-note {
+    margin-top: 6px;
+    color: var(--dark-gray);
+    font-size: 0.9rem;
+  }
+  
   .hostname-selector,
   .forwarding-selector {
     flex-direction: column;
@@ -1846,9 +1897,21 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Load saved credentials
   loadCredentials();
+  // If credentials were loaded, auto-refresh zones and certificates
+  if (window.cfCredentials) {
+    try { listCertificates(); } catch (e) { console.error('Auto listCertificates failed:', e); }
+    try { loadZonesForSelect('zone-select'); } catch (e) { console.error('Auto load zones (hostnames) failed:', e); }
+    try { loadZonesForSelect('forwarding-zone-select'); } catch (e) { console.error('Auto load zones (forwarding) failed:', e); }
+    try { loadCertificatesForHostnames(); } catch (e) { console.error('Auto load certs for hostnames failed:', e); }
+  }
   
   // Save credentials
   document.getElementById('save-credentials').addEventListener('click', saveCredentials);
+  // Toggle auth method UI
+  document.querySelectorAll('input[name="auth-method"]').forEach(r => {
+    r.addEventListener('change', toggleAuthMethod);
+  });
+  toggleAuthMethod();
   
   // File upload handling
   document.getElementById('cert-file').addEventListener('change', handleFileUpload);
@@ -1856,28 +1919,15 @@ document.addEventListener('DOMContentLoaded', function() {
   // Certificate upload
   document.getElementById('upload-cert').addEventListener('click', uploadCertificate);
   
-  // Refresh certificate list
-  document.getElementById('refresh-certs').addEventListener('click', listCertificates);
-  
-  // Load zones for hostname associations
-  document.getElementById('load-zones').addEventListener('click', loadZones);
-  
-  // Load certificates for hostname associations
-  document.getElementById('load-certs-for-hostnames').addEventListener('click', loadCertificatesForHostnames);
-  
+  // Auto refresh hostname associations when zone/certificate selection changes
+  document.getElementById('zone-select').addEventListener('change', refreshHostnameAssociations);
+  document.getElementById('cert-select').addEventListener('change', refreshHostnameAssociations);
+
   // Add hostname association
   document.getElementById('add-hostname').addEventListener('click', addHostnameAssociation);
   
-  // Refresh hostname associations
-  document.getElementById('refresh-hostnames').addEventListener('click', refreshHostnameAssociations);
-  
-  // Load zones for certificate forwarding
-  document.getElementById('load-forwarding-zones').addEventListener('click', function() {
-    loadZonesForSelect('forwarding-zone-select');
-  });
-  
-  // Check certificate forwarding settings
-  document.getElementById('check-forwarding').addEventListener('click', checkCertificateForwarding);
+  // Auto check certificate forwarding when zone selection changes
+  document.getElementById('forwarding-zone-select').addEventListener('change', checkCertificateForwarding);
   
   // Enable certificate forwarding
   document.getElementById('enable-forwarding').addEventListener('click', function() {
@@ -1895,10 +1945,24 @@ function loadCredentials() {
   if (localStorage.getItem('cf_credentials')) {
     try {
       const credentials = JSON.parse(localStorage.getItem('cf_credentials'));
-      document.getElementById('email').value = credentials.email || '';
-      document.getElementById('api-key').value = credentials.apiKey || '';
+      const method = credentials.method || (credentials.token ? 'token' : 'legacy');
+      const methodRadio = document.querySelector('input[name="auth-method"][value="' + method + '"]');
+      if (methodRadio) methodRadio.checked = true;
+      toggleAuthMethod();
+      document.getElementById('api-token').value = credentials.token || '';
+      const emailEl = document.getElementById('auth-email');
+      const keyEl = document.getElementById('auth-key');
+      if (emailEl) emailEl.value = credentials.email || '';
+      if (keyEl) keyEl.value = credentials.key || '';
       document.getElementById('account-id').value = credentials.accountId || '';
-      
+
+      // Initialize in-memory credentials for immediate use if valid
+      if (method === 'token' && credentials.token && credentials.accountId) {
+        window.cfCredentials = { method: 'token', token: credentials.token, accountId: credentials.accountId };
+      } else if (method === 'legacy' && credentials.email && credentials.key && credentials.accountId) {
+        window.cfCredentials = { method: 'legacy', email: credentials.email, key: credentials.key, accountId: credentials.accountId };
+      }
+
       showMessage('credentials-message', 'Loaded saved credentials from browser storage.', 'info');
     } catch (error) {
       console.error('Failed to load credentials:', error);
@@ -1908,22 +1972,26 @@ function loadCredentials() {
 
 // Save credentials to localStorage
 function saveCredentials() {
-  const email = document.getElementById('email').value.trim();
-  const apiKey = document.getElementById('api-key').value.trim();
+  const method = document.querySelector('input[name="auth-method"]:checked').value;
+  const token = document.getElementById('api-token').value.trim();
+  const email = (document.getElementById('auth-email')?.value || '').trim();
+  const key = (document.getElementById('auth-key')?.value || '').trim();
   const accountId = document.getElementById('account-id').value.trim();
   const rememberCredentials = document.getElementById('remember-credentials').checked;
   
-  if (!email || !apiKey || !accountId) {
-    showMessage('credentials-message', 'Please fill in all credential fields.', 'error');
-    return;
+  if (method === 'token') {
+    if (!token || !accountId) {
+      showMessage('credentials-message', 'Please provide API Token and Account ID.', 'error');
+      return;
+    }
+    window.cfCredentials = { method, token, accountId };
+  } else {
+    if (!email || !key || !accountId) {
+      showMessage('credentials-message', 'Please provide Email, API Key, and Account ID.', 'error');
+      return;
+    }
+    window.cfCredentials = { method, email, key, accountId };
   }
-  
-  // Store credentials in memory for current session
-  window.cfCredentials = {
-    email,
-    apiKey,
-    accountId
-  };
   
   // Optionally save to localStorage
   if (rememberCredentials) {
@@ -1983,8 +2051,7 @@ function uploadCertificate() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
+      ...buildAuthHeaders(credentials)
     },
     body: JSON.stringify({
       name,
@@ -2027,10 +2094,7 @@ function listCertificates() {
   // Fetch certificates
   fetch('/api/certificates?accountId=' + encodeURIComponent(credentials.accountId), {
     method: 'GET',
-    headers: {
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
-    }
+    headers: buildAuthHeaders(credentials)
   })
   .then(response => response.json())
   .then(data => {
@@ -2095,8 +2159,7 @@ function loadZonesForSelect(selectId) {
   
   // Log the API call we're about to make for debugging
   console.log('Fetching zones from /api/zones with headers:', {
-    'X-Auth-Email': credentials.email ? 'Present' : 'Missing',
-    'X-Auth-Key': credentials.apiKey ? 'Present' : 'Missing'
+    'Auth': credentials.token ? 'Bearer' : 'Missing'
   });
   
   // Fetch zones
@@ -2104,8 +2167,7 @@ function loadZonesForSelect(selectId) {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
+      ...buildAuthHeaders(credentials)
     }
   })
   .then(response => {
@@ -2158,10 +2220,7 @@ function loadCertificatesForHostnames() {
   // Fetch certificates
   fetch('/api/certificates?accountId=' + encodeURIComponent(credentials.accountId), {
     method: 'GET',
-    headers: {
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
-    }
+    headers: buildAuthHeaders(credentials)
   })
   .then(response => response.json())
   .then(data => {
@@ -2291,8 +2350,7 @@ function addHostnameAssociation() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
+      ...buildAuthHeaders(credentials)
     },
     body: JSON.stringify(payload)
   })
@@ -2367,10 +2425,7 @@ function refreshHostnameAssociations() {
   // Fetch hostname associations
   fetch(apiUrl, {
     method: 'GET',
-    headers: {
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
-    }
+    headers: buildAuthHeaders(credentials)
   })
   .then(response => {
     console.log("Response status:", response.status);
@@ -2393,10 +2448,7 @@ function refreshHostnameAssociations() {
       // Load certificates to get their names
       fetch('/api/certificates?accountId=' + encodeURIComponent(credentials.accountId), {
         method: 'GET',
-        headers: {
-          'X-Auth-Email': credentials.email,
-          'X-Auth-Key': credentials.apiKey
-        }
+        headers: buildAuthHeaders(credentials)
       })
       .then(response => response.json())
       .then(certData => {
@@ -2486,10 +2538,7 @@ function deleteHostnameAssociation(certId, hostname) {
   // Delete hostname association
   fetch(\`/api/certificates/\${certId}/hostnames?zoneId=\${encodeURIComponent(zoneId)}&hostname=\${encodeURIComponent(hostname)}\`, {
     method: 'DELETE',
-    headers: {
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
-    }
+    headers: buildAuthHeaders(credentials)
   })
   .then(response => response.json())
   .then(data => {
@@ -2532,10 +2581,7 @@ function checkCertificateForwarding() {
   // Check certificate forwarding settings
   fetch(\`/api/zones/\${zoneId}/certificate_forwarding\`, {
     method: 'GET',
-    headers: {
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
-    }
+    headers: buildAuthHeaders(credentials)
   })
   .then(response => response.json())
   .then(data => {
@@ -2628,8 +2674,7 @@ function updateCertificateForwarding(enabled) {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      'X-Auth-Email': credentials.email,
-      'X-Auth-Key': credentials.apiKey
+      ...buildAuthHeaders(credentials)
     },
     body: JSON.stringify({
       hostname: hostname,
@@ -2666,20 +2711,36 @@ function getCredentials() {
   }
   
   // Otherwise, get from form
-  const email = document.getElementById('email').value.trim();
-  const apiKey = document.getElementById('api-key').value.trim();
+  const method = document.querySelector('input[name="auth-method"]:checked').value;
+  const token = document.getElementById('api-token').value.trim();
+  const email = (document.getElementById('auth-email')?.value || '').trim();
+  const key = (document.getElementById('auth-key')?.value || '').trim();
   const accountId = document.getElementById('account-id').value.trim();
   
-  if (!email || !apiKey || !accountId) {
-    showMessage('credentials-message', 'Please fill in and save your Cloudflare credentials.', 'error');
-    // Switch to credentials tab
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    
-    return null;
+  if (method === 'token') {
+    if (!token || !accountId) {
+      showMessage('credentials-message', 'Please provide API Token and Account ID, then Save.', 'error');
+      return null;
+    }
+    return { method, token, accountId };
+  } else {
+    if (!email || !key || !accountId) {
+      showMessage('credentials-message', 'Please provide Email, API Key, and Account ID, then Save.', 'error');
+      return null;
+    }
+    return { method, email, key, accountId };
   }
-  
-  return { email, apiKey, accountId };
+}
+
+// Build auth headers for API calls
+function buildAuthHeaders(credentials) {
+  if (credentials.method === 'legacy') {
+    return {
+      'X-Auth-Email': credentials.email,
+      'X-Auth-Key': credentials.key,
+    };
+  }
+  return { 'Authorization': 'Bearer ' + credentials.token };
 }
 
 // Show message
@@ -2698,6 +2759,20 @@ function showMessage(elementId, message, type) {
       element.textContent = '';
       element.className = 'message';
     }, 5000);
+  }
+}
+
+// Toggle auth method UI
+function toggleAuthMethod() {
+  const method = document.querySelector('input[name="auth-method"]:checked').value;
+  const tokenDiv = document.getElementById('token-credentials');
+  const legacyDiv = document.getElementById('legacy-credentials');
+  if (method === 'token') {
+    tokenDiv.style.display = 'block';
+    legacyDiv.style.display = 'none';
+  } else {
+    tokenDiv.style.display = 'none';
+    legacyDiv.style.display = 'block';
   }
 }
 `;
