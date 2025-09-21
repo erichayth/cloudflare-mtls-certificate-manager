@@ -125,6 +125,21 @@ async function handleRequest(request) {
     return new Response(getHtmlUI(), {
       headers: {
         "Content-Type": "text/html;charset=UTF-8",
+        // Default CSP to reduce XSS risk while allowing this app to function
+        // - Loads only same-origin resources (script/style/img/connect)
+        // - Disables framing and plugins
+        "Content-Security-Policy": [
+          "default-src 'none'",
+          "script-src 'self'",
+          "style-src 'self'",
+          "img-src 'self' data:",
+          "connect-src 'self'",
+          "font-src 'self'",
+          "frame-ancestors 'none'",
+          "base-uri 'none'",
+          "form-action 'self'",
+          "object-src 'none'"
+        ].join('; '),
       },
     });
   }
@@ -1332,17 +1347,17 @@ function getHtmlUI() {
           <label><input type="radio" name="auth-method" value="token"> API Token</label>
           <label><input type="radio" name="auth-method" value="legacy" checked> Email + API Key</label>
         </div>
-        <p class="info-note">Note: Only Global API Keys are supported at this time. API Token support will be added in the future.</p>
+        <p class="info-note">Use a scoped API Token when possible. Global API Key is supported for compatibility.</p>
       </div>
 
       <div id="token-credentials">
         <div class="form-group">
-          <label for="api-token">API Token (coming soon)</label>
+          <label for="api-token">API Token</label>
           <input type="password" id="api-token" placeholder="Cloudflare API Token (scoped)">
         </div>
       </div>
 
-      <div id="legacy-credentials" style="display:none;">
+      <div id="legacy-credentials">
         <div class="form-group">
           <label for="auth-email">Email</label>
           <input type="email" id="auth-email" placeholder="you@example.com">
@@ -1467,7 +1482,7 @@ function getHtmlUI() {
         </div>
       </div>
       
-      <div class="forwarding-toggle" style="display: none;">
+      <div class="forwarding-toggle">
         <h3>Certificate Forwarding Settings</h3>
         <div id="forwarding-settings-list">
           <!-- Will be populated with hostname settings -->
@@ -1512,6 +1527,10 @@ function getStyles() {
   --warning-color: #f39c12;
   --info-color: #3498db;
 }
+
+/* Hide sections that are shown by JS when appropriate */
+#token-credentials { display: none; }
+.forwarding-toggle { display: none; }
 
 * {
   box-sizing: border-box;

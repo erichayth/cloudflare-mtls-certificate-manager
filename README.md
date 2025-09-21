@@ -15,6 +15,7 @@ Public Example: https://certmanager.cf-tool.com/
 - Configure client certificate forwarding settings for origin servers
 - Easy-to-use web interface
 - RESTful API endpoints for programmatic access
+- Supports API Token and Global API Key authentication
 
 ## Deployment Instructions
 
@@ -39,20 +40,20 @@ Public Example: https://certmanager.cf-tool.com/
      ACCOUNT_ID: "your-account-id-here", // Replace or set as a secret
      
      // Auth settings - can be replaced with Workers Secrets or environment variables
-     AUTH_EMAIL: "your-email@example.com", // Email for Global API Key auth
-     AUTH_KEY: "your-global-api-key-here", // Global API Key (required if using server-side auth)
-     AUTH_TOKEN: "",                   // API Token (UI support coming soon)
-     ALLOWED_ORIGINS: ""               // Comma-separated CORS allowlist (empty = same-origin only)
-   };
-   ```
+    AUTH_EMAIL: "your-email@example.com", // Email for Global API Key auth
+    AUTH_KEY: "your-global-api-key-here", // Global API Key (required if using server-side auth)
+    AUTH_TOKEN: "",                   // API Token (optional server-side token)
+    ALLOWED_ORIGINS: ""               // Comma-separated CORS allowlist (empty = same-origin only)
+  };
+  ```
 
-3. Current auth: Only Global API Keys are supported in the UI. API Token support will be added in the future. If you choose to configure credentials server-side, set them via Wrangler secrets/vars (recommended rather than hardcoding):
+3. Current auth: Global API Keys and API Tokens are supported in the UI. If you choose to configure credentials server-side, set them via Wrangler secrets/vars (recommended rather than hardcoding):
    ```bash
    wrangler secret put ACCOUNT_ID
    wrangler secret put AUTH_EMAIL
    wrangler secret put AUTH_KEY
-   # Optional until token support is added to the UI
-   wrangler secret put AUTH_TOKEN
+  # Optional: set a server-side API Token if you don't accept client creds
+  wrangler secret put AUTH_TOKEN
    ```
 
    And set a CORS allowlist in `wrangler.toml` if needed:
@@ -65,6 +66,9 @@ Public Example: https://certmanager.cf-tool.com/
    - Leave `ALLOWED_ORIGINS` empty for strict same-origin: only the deployed worker host (e.g., `https://<service>.<subdomain>.workers.dev` or your custom route host) is allowed.
    - Set one or more exact origins (comma-separated) to allow cross-origin browser calls from those sites.
    - No wildcard is emitted; non-browser requests (no `Origin` header) don’t get an `Access-Control-Allow-Origin` header.
+
+   Security headers:
+   - The UI HTML is served with a default Content-Security-Policy that allows only same-origin resources and disallows framing and plugins. If you embed the UI elsewhere or load external assets, you may need to adjust the CSP in `worker.js`.
 
 ### Deploy with Wrangler
 
@@ -104,7 +108,7 @@ You can also deploy directly from the Cloudflare Dashboard:
 
 After deployment, access the web UI by visiting your Worker URL. The interface provides:
 
-1. **Credentials Section** - Enter your Email + Global API Key and Account ID. Note: Only Global API Keys are supported in the UI currently. API Token support will be added in the future.
+1. **Credentials Section** - Choose API Token or Email + Global API Key and enter your Account ID. Prefer API Tokens with minimal scopes. You can optionally "Remember credentials" (stored in localStorage) or keep them for the current session only (in-memory).
 2. **Upload Certificate** - Upload new CA certificates
 3. **List Certificates** - View all existing certificates
 4. **Hostname Associations** - Associate certificates with specific hostnames
@@ -125,6 +129,20 @@ The worker provides the following API endpoints:
 - `PUT /api/zones/{zoneId}/certificate_forwarding` - Update certificate forwarding settings
 
 For more details on API usage, please refer to the code comments in `worker.js`.
+
+## API Token Permissions
+
+When using API Tokens (recommended), grant the minimal permissions needed and scope them to only the zones you manage. The app calls the following Cloudflare APIs and requires permissions roughly equivalent to:
+
+- Zones: Read — List zones (`GET /zones`).
+- SSL and Certificates (Zone): Read, Edit — Manage mTLS hostname associations under a zone (`/zones/{zoneId}/certificate_authorities/hostname_associations`).
+- Access (Zone): Read, Edit — Read and update certificate forwarding settings (`/zones/{zoneId}/access/certificates/settings`).
+- SSL and Certificates (Account) or mTLS Certificates (Account): Read, Edit — Create and list account mTLS certificates (`/accounts/{accountId}/mtls_certificates`).
+
+Notes:
+- Permission names shown in the API Token builder can vary slightly; in general, look for “SSL and Certificates” and “Access” permissions at the appropriate scope (Zone vs. Account).
+- Scope tokens to specific zones where possible, and to a single account.
+- Global API Keys are supported for compatibility but are not scoped; prefer API Tokens.
 
 ## License
 
